@@ -9,7 +9,8 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.rinnt.ViroExpoApp"
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +20,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.rinnt.ViroExpoApp"
     },
     "web": {
       "output": "static",
@@ -37,6 +39,14 @@
           "dark": {
             "backgroundColor": "#000000"
           }
+        }
+      ],
+      [
+        "@reactvision/react-viro",
+        {
+          "provider": "reactvision",
+          "rvApiKey": "rv_live_561cc5f1fb3f5dcb75b2989deb6f8ba269a7cafa0e1fa392ea29ab03970ca66c",
+          "rvProjectId": "b0076318-367e-4d59-be48-6a5b1d2d0d68"
         }
       ]
     ],
