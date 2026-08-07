@@ -11,6 +11,11 @@ export type LocationInfo = {
   name?: string;
 };
 
+export type MarkerLine = {
+  start: [number, number, number];
+  end: [number, number, number];
+};
+
 export type Position = [number, number];
 
 export type LinearRing = Position[];
@@ -238,4 +243,18 @@ export function findStateAtCoordinate(
   }
 
   return null;
+}
+
+export function normalizeGeometry(
+  geometry: GeoFeature["geometry"],
+): PolygonCoordinates[] {
+  if (geometry.type === "Polygon") {
+    return [geometry.coordinates];
+  }
+
+  if (geometry.type === "MultiPolygon") {
+    return geometry.coordinates;
+  }
+
+  return [];
 }
