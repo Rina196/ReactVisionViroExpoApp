@@ -4,18 +4,17 @@ import { useMemo } from "react";
 import earcut from "earcut";
 
 import {
-    GeoFeature,
-    PolygonCoordinates,
-    Vec3,
-    normalizeGeometry,
+  GeoFeature,
+  PolygonCoordinates,
+  Vec3,
+  normalizeGeometry,
+  normalizeVector,
 } from "./utils/ar-utils";
 
 type Props = {
   feature: GeoFeature | null;
   color?: string;
   earthRadius: number;
-  earthPosition: [number, number, number];
-  sphereRotation: [number, number, number];
 };
 
 type GeometryData = {
@@ -31,8 +30,6 @@ export default function StateHighlight({
   feature,
   color = "#FF000066",
   earthRadius,
-  earthPosition,
-  sphereRotation,
 }: Props) {
   const materialName = useMemo(() => {
     const name = `stateHighlight_${color.replace("#", "")}`;
@@ -48,6 +45,17 @@ export default function StateHighlight({
     return name;
   }, [color]);
 
+  /**
+   * Everything generated here is in EARTH LOCAL SPACE.
+   *
+   * It does not know:
+   *
+   * - AR camera position
+   * - plane position
+   * - Earth world position
+   * - Earth world rotation
+   * - Earth scale
+   */
   const geometries = useMemo(() => {
     if (!feature) {
       return [];
@@ -60,8 +68,22 @@ export default function StateHighlight({
     return null;
   }
 
+  /**
+   * IMPORTANT:
+   *
+   * This node is local to the Earth ViroNode.
+   *
+   * Parent:
+   *
+   *   position = plane tap
+   *   rotation = Earth rotation
+   *   scale = Earth scale
+   *
+   * Therefore this geometry automatically follows
+   * the Earth.
+   */
   return (
-    <ViroNode position={earthPosition} rotation={sphereRotation}>
+    <ViroNode position={[0, 0, 0]} rotation={[0, 0, 0]} scale={[1, 1, 1]}>
       {geometries.map((geometry, index) => (
         <ViroGeometry
           key={`state-highlight-${index}`}
@@ -133,10 +155,6 @@ function createPolygonGeometry(
   for (let ringIndex = 0; ringIndex < validRings.length; ringIndex++) {
     const ring = validRings[ringIndex];
 
-    /**
-     * Earcut hole index points to the first
-     * vertex of each hole.
-     */
     if (ringIndex > 0) {
       holeIndices.push(vertexCount);
     }
@@ -184,19 +202,13 @@ function createPolygonGeometry(
     /**
      * IMPORTANT:
      *
-     * This mapping MUST be the exact inverse of
-     * your existing surfacePointToLatLng().
+     * This is Earth LOCAL space.
      *
-     * surfacePointToLatLng():
+     * The parent ViroNode handles:
      *
-     * latitude  = -asin(y)
-     * longitude = atan2(x, -z) - 90
-     *
-     * Therefore:
-     *
-     * x =  cos(lat) * cos(lon)
-     * y = -sin(lat)
-     * z =  cos(lat) * sin(lon)
+     *   Earth position
+     *   Earth rotation
+     *   Earth scale
      */
     const point = latLonToEarthVector(
       latitude,
@@ -207,7 +219,7 @@ function createPolygonGeometry(
     vertices.push([point.x, point.y, point.z]);
 
     /**
-     * Normal points away from the Earth.
+     * Normal points away from Earth.
      */
     const normal = normalizeVector(point);
 
@@ -257,7 +269,7 @@ function createPolygonGeometry(
 /* -------------------------------------------------------------------------- */
 
 /**
- * EXACT inverse of surfacePointToLatLng().
+ * Exact inverse of surfacePointToLatLng().
  *
  * Existing:
  *
@@ -266,9 +278,9 @@ function createPolygonGeometry(
  *
  * Therefore:
  *
- * x = radius * cos(latitude) * cos(longitude)
- * y = -radius * sin(latitude)
- * z = radius * cos(latitude) * sin(longitude)
+ * x = radius * cos(lat) * cos(lon)
+ * y = -radius * sin(lat)
+ * z = radius * cos(lat) * sin(lon)
  */
 function latLonToEarthVector(
   latitude: number,
@@ -276,13 +288,16 @@ function latLonToEarthVector(
   radius: number,
 ): Vec3 {
   const lat = (latitude * Math.PI) / 180;
+
   const lon = (longitude * Math.PI) / 180;
 
   const cosLat = Math.cos(lat);
 
   return {
     x: radius * cosLat * Math.cos(lon),
+
     y: -radius * Math.sin(lat),
+
     z: radius * cosLat * Math.sin(lon),
   };
 }
@@ -291,25 +306,25 @@ function latLonToEarthVector(
 /*                              NORMAL                                        */
 /* -------------------------------------------------------------------------- */
 
-function normalizeVector(vector: Vec3): Vec3 {
-  const length = Math.sqrt(
-    vector.x * vector.x + vector.y * vector.y + vector.z * vector.z,
-  );
+// function normalizeVector(vector: Vec3): Vec3 {
+//   const length = Math.sqrt(
+//     vector.x * vector.x + vector.y * vector.y + vector.z * vector.z,
+//   );
 
-  if (length === 0) {
-    return {
-      x: 0,
-      y: 0,
-      z: 0,
-    };
-  }
+//   if (length === 0) {
+//     return {
+//       x: 0,
+//       y: 0,
+//       z: 0,
+//     };
+//   }
 
-  return {
-    x: vector.x / length,
-    y: vector.y / length,
-    z: vector.z / length,
-  };
-}
+//   return {
+//     x: vector.x / length,
+//     y: vector.y / length,
+//     z: vector.z / length,
+//   };
+// }
 
 /* -------------------------------------------------------------------------- */
 /*                              VALIDATION                                    */
@@ -332,6 +347,7 @@ function isValidRing(ring: unknown): boolean {
     }
 
     const longitude = Number(coordinate[0]);
+
     const latitude = Number(coordinate[1]);
 
     if (Number.isFinite(longitude) && Number.isFinite(latitude)) {

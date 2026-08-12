@@ -1,4 +1,5 @@
 import {
+  ViroARPlaneSelector,
   ViroARScene,
   ViroARSceneNavigator,
   ViroMaterials,
@@ -9,13 +10,17 @@ import React, { useRef, useState } from "react";
 
 import indiaGeoJson from "../../assets/IND.json";
 
+import { ViroClickState } from "@reactvision/react-viro/dist/components/Types/ViroEvents";
 import StateHighlight from "../stateHighlight";
 import {
+  earthLocalToWorld,
+  EarthTransform,
   findStateAtCoordinate,
   GeoFeature,
   normalizeVector,
   surfacePointToLatLng,
   Vec3,
+  worldToEarthLocal,
 } from "../utils/ar-utils";
 
 type Vec3Tuple = [number, number, number];
@@ -25,6 +30,15 @@ type SphereMarker = {
   position: Vec3Tuple;
   end: Vec3Tuple;
 };
+
+const SPHERE_RADIUS = 0.5;
+
+const MIN_SCALE = 0.5;
+const MAX_SCALE = 3;
+
+// Keep the same rotation that was already working
+// with your Earth texture + GeoJSON coordinate system.
+const EARTH_ROTATION: [number, number, number] = [0, 0, 180];
 
 export default function ViroExample() {
   return (
@@ -41,86 +55,111 @@ export default function ViroExample() {
 function MyARScene() {
   const [markers, setMarkers] = useState<SphereMarker[]>([]);
   const [selectedState, setSelectedState] = useState<GeoFeature | null>(null);
+
+  /**
+   * Earth scale is kept separately because pinch changes it.
+   *
+   * IMPORTANT:
+   *
+   * Geographic calculations always use the LOCAL sphere radius.
+   *
+   * Actual world radius = SPHERE_RADIUS * earthScale
+   */
   const [earthScale, setEarthScale] = useState(1);
 
-  const MIN_SCALE = 0.5;
-  const MAX_SCALE = 3;
+  /**
+   * Earth is initially not placed.
+   *
+   * Once the user taps a detected plane, this becomes
+   * the WORLD position of the Earth.
+   */
+  const [earthPosition, setEarthPosition] = useState<Vec3 | null>(null);
+
+  /**
+   * This is the single source of truth for the Earth transform.
+   *
+   * LOCAL Earth:
+   *
+   *   center = [0, 0, 0]
+   *   radius = 0.5
+   *
+   * WORLD Earth:
+   *
+   *   position = plane tap position
+   *   rotation = EARTH_ROTATION
+   *   scale = earthScale
+   */
+  const earthTransform: EarthTransform | null = earthPosition
+    ? {
+        position: earthPosition,
+        rotation: EARTH_ROTATION,
+        scale: earthScale,
+        radius: SPHERE_RADIUS,
+      }
+    : null;
 
   // --------------------------------------------------
-  // Sphere parameters
+  // Plane selection
   // --------------------------------------------------
 
-  const sphereCenter: Vec3 = {
-    x: 0,
-    y: 0,
-    z: -1,
-  };
+  /**
+   * IMPORTANT:
+   *
+   * Depending on your installed ReactVision Viro version,
+   * the exact ViroARScene plane APIs can differ.
+   *
+   * The important value we need from plane selection is:
+   *
+   *   tapPosition = [x, y, z]
+   *
+   * in WORLD coordinates.
+   *
+   * If you already have a working ViroARPlaneSelector
+   * implementation, use its onPlaneSelected callback
+   * to call this function.
+   */
+  const handlePlaneSelected = (tapPosition: Vec3Tuple) => {
+    console.log("================================");
+    console.log("🌎 PLANE TAP:", tapPosition);
 
-  const sphereRadius = 0.5;
-
-  // Your existing sphere rotation.
-  const sphereRotation: [number, number, number] = [0, 0, 180];
-
-  // --------------------------------------------------
-  // Rotate vector by Euler rotation
-  // --------------------------------------------------
-
-  const rotateVector = (v: Vec3, euler: [number, number, number]): Vec3 => {
-    const radX = (euler[0] * Math.PI) / 180;
-    const radY = (euler[1] * Math.PI) / 180;
-    const radZ = (euler[2] * Math.PI) / 180;
-
-    // RX
-    const y1 = v.y * Math.cos(radX) - v.z * Math.sin(radX);
-
-    const z1 = v.y * Math.sin(radX) + v.z * Math.cos(radX);
-
-    const x1 = v.x;
-
-    // RY
-    const x2 = x1 * Math.cos(radY) + z1 * Math.sin(radY);
-
-    const z2 = -x1 * Math.sin(radY) + z1 * Math.cos(radY);
-
-    const y2 = y1;
-
-    // RZ
-    const x3 = x2 * Math.cos(radZ) - y2 * Math.sin(radZ);
-
-    const y3 = x2 * Math.sin(radZ) + y2 * Math.cos(radZ);
-
-    const z3 = z2;
-
-    return {
-      x: x3,
-      y: y3,
-      z: z3,
+    const position: Vec3 = {
+      x: tapPosition[0],
+      y: tapPosition[1],
+      z: tapPosition[2],
     };
+
+    setEarthPosition(position);
+
+    // Clear previous geographic selection when placing
+    // a new Earth.
+    setSelectedState(null);
+
+    // Optional: clear old markers.
+    setMarkers([]);
+
+    console.log("🌍 EARTH WORLD POSITION:", position);
+    console.log("================================");
   };
 
   // --------------------------------------------------
   // Sphere click
-  //
-  // IMPORTANT:
-  // This is your existing custom calculation.
-  // It has not been replaced with camera/raycast
-  // calculation.
   // --------------------------------------------------
 
-  const _handleSphereClick = (
-    clickState: number,
+  const handleSphereClick = (
+    clickState: ViroClickState,
     clickPos: [number, number, number] | null | undefined,
   ) => {
-    if (clickState !== 3 || !clickPos) {
+    console.log("clickPos", clickPos, clickState);
+
+    if (!clickPos || !earthTransform) {
       return;
     }
 
     console.log("================================");
-
-    console.log("RAW CLICK:", clickPos);
+    console.log("🌍 RAW CLICK WORLD:", clickPos);
 
     // --------------------------------------------------
-    // 1. World -> sphere local
+    // 1. Viro click position is WORLD coordinates.
     // --------------------------------------------------
 
     const worldPoint: Vec3 = {
@@ -129,28 +168,35 @@ function MyARScene() {
       z: clickPos[2],
     };
 
-    const translatedPoint: Vec3 = {
-      x: worldPoint.x - sphereCenter.x,
-
-      y: worldPoint.y - sphereCenter.y,
-
-      z: worldPoint.z - sphereCenter.z,
-    };
+    console.log("WORLD POINT:", worldPoint);
 
     // --------------------------------------------------
-    // 2. Undo sphere rotation
+    // 2. WORLD -> EARTH LOCAL
+    //
+    // This removes:
+    //
+    //   Earth position
+    //   Earth scale
+    //   Earth rotation
+    //
+    // After this point everything is back inside
+    // the original coordinate system of your Earth.
     // --------------------------------------------------
 
-    const inverseRotation: [number, number, number] = [
-      -sphereRotation[0],
-      -sphereRotation[1],
-      -sphereRotation[2],
-    ];
+    const localPoint = worldToEarthLocal(worldPoint, earthTransform);
 
-    const localPoint = rotateVector(translatedPoint, inverseRotation);
+    console.log("LOCAL CLICK:", localPoint);
 
     // --------------------------------------------------
-    // 3. Project directly onto sphere surface
+    // 3. Project onto LOCAL sphere surface
+    //
+    // IMPORTANT:
+    //
+    // Use SPHERE_RADIUS, NOT:
+    //
+    //   SPHERE_RADIUS * earthScale
+    //
+    // because scale was already removed above.
     // --------------------------------------------------
 
     const distance = Math.sqrt(
@@ -160,30 +206,39 @@ function MyARScene() {
     );
 
     if (distance === 0) {
+      console.log("❌ Invalid click distance");
       return;
     }
 
-    const scale = sphereRadius / distance;
+    const projectionScale = SPHERE_RADIUS / distance;
 
     const surfaceLocal: Vec3 = {
-      x: localPoint.x * scale,
-      y: localPoint.y * scale,
-      z: localPoint.z * scale,
+      x: localPoint.x * projectionScale,
+      y: localPoint.y * projectionScale,
+      z: localPoint.z * projectionScale,
     };
 
     console.log("LOCAL SURFACE:", surfaceLocal);
 
     // --------------------------------------------------
-    // 4. Calculate lat/lng
+    // 4. LOCAL SURFACE -> LAT/LON
+    //
+    // This function does not know anything about AR.
+    // It continues to use your original Earth mapping.
     // --------------------------------------------------
 
     const { latitude, longitude } = surfacePointToLatLng(
       surfaceLocal,
-      sphereRadius,
+      SPHERE_RADIUS,
     );
 
+    console.log("🌍 LAT/LON:", {
+      latitude,
+      longitude,
+    });
+
     // --------------------------------------------------
-    // 5. Find GeoJSON state
+    // 5. GeoJSON state lookup
     // --------------------------------------------------
 
     const detectedState = findStateAtCoordinate(
@@ -195,9 +250,7 @@ function MyARScene() {
     console.log("🌍 TAP LOCATION", {
       latitude,
       longitude,
-
       country: detectedState?.properties.shapeGroup ?? null,
-
       state: detectedState?.properties.shapeName ?? null,
     });
 
@@ -212,52 +265,64 @@ function MyARScene() {
     }
 
     // --------------------------------------------------
-    // 7. Local -> World
+    // 6. LOCAL -> WORLD
+    //
+    // Used only for debugging / markers.
     // --------------------------------------------------
 
-    const rotatedSurface = rotateVector(surfaceLocal, sphereRotation);
+    const worldSurface = earthLocalToWorld(surfaceLocal, earthTransform);
 
-    const worldSurface: Vec3Tuple = [
-      rotatedSurface.x + sphereCenter.x,
-
-      rotatedSurface.y + sphereCenter.y,
-
-      rotatedSurface.z + sphereCenter.z,
+    const worldSurfaceTuple: Vec3Tuple = [
+      worldSurface.x,
+      worldSurface.y,
+      worldSurface.z,
     ];
 
-    console.log("📍 WORLD SURFACE:", worldSurface);
+    console.log("📍 WORLD SURFACE:", worldSurfaceTuple);
 
     // --------------------------------------------------
-    // 8. World normal
+    // 7. World normal
     // --------------------------------------------------
 
     const localNormal = normalizeVector(surfaceLocal);
 
-    const worldNormal = rotateVector(localNormal, sphereRotation);
+    /**
+     * Scale does NOT affect a normal.
+     *
+     * Only rotation needs to be applied.
+     */
+    const worldNormalPoint = earthLocalToWorld(localNormal, {
+      ...earthTransform,
+      position: {
+        x: 0,
+        y: 0,
+        z: 0,
+      },
+      scale: 1,
+    });
+
+    const worldNormal = normalizeVector(worldNormalPoint);
 
     const lineLength = 0.08;
 
-    const start: Vec3Tuple = worldSurface;
+    const start: Vec3Tuple = worldSurfaceTuple;
 
     const end: Vec3Tuple = [
       start[0] + worldNormal.x * lineLength,
-
       start[1] + worldNormal.y * lineLength,
-
       start[2] + worldNormal.z * lineLength,
     ];
 
     // --------------------------------------------------
-    // 9. Add click marker
+    // 8. Add marker
     // --------------------------------------------------
 
     setMarkers((prev) => [
       ...prev,
       {
         id: `${Date.now()}-${prev.length}`,
-        position: worldSurface,
+        position: worldSurfaceTuple,
         end,
-        start: start,
       },
     ]);
 
@@ -278,7 +343,13 @@ function MyARScene() {
     },
   });
 
+  // --------------------------------------------------
+  // Pinch
+  // --------------------------------------------------
+
   const pinchStartScale = useRef(1);
+  const planeSelectorRef = useRef<ViroARPlaneSelector>(null);
+  const [sphereCenter, setSphereCenter] = useState({ x: 0, y: 0, z: 0 });
 
   const handlePinch = (pinchState: number, scaleFactor: number) => {
     if (pinchState === 1) {
@@ -295,67 +366,139 @@ function MyARScene() {
     }
   };
 
+  console.log("🌍 EARTH SCALE:", earthTransform);
+
   // --------------------------------------------------
   // Render
   // --------------------------------------------------
 
   return (
-    <ViroARScene>
-      {/* ------------------------------------------- */}
-      {/* Earth */}
-      {/* ------------------------------------------- */}
+    <ViroARScene
+      anchorDetectionTypes={["PlanesHorizontal"]}
+      onAnchorFound={(anchor) => {
+        console.log("🟢 ANCHOR FOUND:", anchor);
+        planeSelectorRef.current?.handleAnchorFound(anchor);
+      }}
+      onAnchorUpdated={(anchor) => {
+        planeSelectorRef.current?.handleAnchorUpdated(anchor);
+      }}
+      onAnchorRemoved={(anchor) => {
+        console.log("🔴 ANCHOR REMOVED:", anchor);
+        planeSelectorRef.current?.handleAnchorRemoved(anchor);
+      }}
+    >
+      {/**
+       * ------------------------------------------------
+       * PLANE PLACEMENT
+       * ------------------------------------------------
+       *
+       * Replace this section with the exact
+       * ViroARPlaneSelector implementation from the
+       * version of ReactVision Viro you have installed.
+       *
+       * The important operation is:
+       *
+       * onPlaneSelected(..., tapPosition)
+       *
+       * =>
+       *
+       * handlePlaneSelected(tapPosition)
+       *
+       * ------------------------------------------------
+       */}
 
-      <ViroNode
-        position={[sphereCenter.x, sphereCenter.y, sphereCenter.z]}
-        rotation={sphereRotation}
-        scale={[earthScale, earthScale, earthScale]}
-        onPinch={handlePinch}
-      >
-        <ViroSphere
-          heightSegmentCount={20}
-          widthSegmentCount={20}
-          radius={sphereRadius}
-          position={[0, 0, 0]}
-          materials={["earth"]}
-          facesOutward={true}
-          onClickState={_handleSphereClick}
-        />
+      {!earthTransform && (
+        <ViroNode
+        /* Your plane selector goes here */
+        >
+          <ViroARPlaneSelector
+            ref={planeSelectorRef}
+            alignment="Horizontal"
+            minWidth={0.5}
+            minHeight={0.5}
+            hideOverlayOnSelection={true}
+            useActualShape={true}
+            onPlaneSelected={(anchor, tapPosition) => {
+              if (!tapPosition) {
+                return;
+              }
 
-        {/* ------------------------------------------- */}
-        {/* Click markers */}
-        {/* ------------------------------------------- */}
+              console.log("🌎 EARTH PLACED:", tapPosition);
 
-        {/* {markers.map((marker) => (
-        <React.Fragment key={marker.id}>
-          <ViroPolyline
-            points={[marker.position, marker.end]}
-            thickness={0.003}
-            materials={["markerMaterial"]}
+              setSphereCenter({
+                x: tapPosition[0],
+                y: tapPosition[1],
+                z: tapPosition[2],
+              });
+
+              setEarthPosition({
+                x: tapPosition[0],
+                y: tapPosition[1],
+                z: tapPosition[2],
+              });
+            }}
+          ></ViroARPlaneSelector>
+        </ViroNode>
+      )}
+
+      {/**
+       * ------------------------------------------------
+       * EARTH
+       * ------------------------------------------------
+       */}
+
+      {earthTransform && (
+        <ViroNode
+          position={[
+            earthTransform.position.x,
+            earthTransform.position.y,
+            earthTransform.position.z,
+          ]}
+          rotation={earthTransform.rotation}
+          scale={[
+            earthTransform.scale,
+            earthTransform.scale,
+            earthTransform.scale,
+          ]}
+          onPinch={handlePinch}
+        >
+          <ViroSphere
+            heightSegmentCount={40}
+            widthSegmentCount={40}
+            radius={SPHERE_RADIUS}
+            position={[0, 0, 0]}
+            highAccuracyEvents={true}
+            materials={["earth"]}
+            facesOutward={true}
+            // onClick={handleSphereClick}
+            onClickState={handleSphereClick}
           />
 
-          <ViroBox
-            position={marker.position}
-            scale={[0.005, 0.005, 0.005]}
-            materials={["markerMaterial"]}
-          />
-        </React.Fragment>
-      ))} */}
+          {/**
+           * IMPORTANT:
+           *
+           * StateHighlight is LOCAL to this Earth node.
+           *
+           * Therefore it does NOT need:
+           *
+           * earthPosition
+           * sphereRotation
+           *
+           * Viro automatically applies the parent's
+           * world transform.
+           */}
 
-        {selectedState && (
-          <StateHighlight
-            feature={selectedState}
-            color="#00FFFF"
-            earthRadius={sphereRadius}
-            earthPosition={[0, 0, 0]}
-            sphereRotation={[0, 0, 0]}
-          />
-        )}
-      </ViroNode>
+          {selectedState && (
+            <ViroNode ignoreEventHandling={true}>
+              <StateHighlight
+                feature={selectedState}
+                color="#00FFFF"
+                earthRadius={SPHERE_RADIUS}
+              />
+            </ViroNode>
+          )}
+        </ViroNode>
+      )}
     </ViroARScene>
   );
 }
-
-ViroMaterials.createMaterials({
-  sphereMaterial: { diffuseColor: "#FF0000" },
-  markerMaterial: { diffuseColor: "#00FF00" },
-});
