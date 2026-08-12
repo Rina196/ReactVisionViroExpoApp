@@ -132,14 +132,26 @@ export function surfacePointToLatLng(
     z: localPoint.z / sphereRadius,
   });
 
+  // IMPORTANT:
+  // Your ViroSphere / Earth coordinate system has
+  // geographic North opposite to the local +Y direction.
+  //
+  // Therefore latitude must be inverted.
   const latitude = (-Math.asin(normalized.y) * 180) / Math.PI;
 
+  // Keep your currently-working longitude calculation.
   let longitude = (Math.atan2(normalized.x, -normalized.z) * 180) / Math.PI;
 
+  // Your existing 90° texture/UV alignment correction.
   longitude -= 90;
 
-  if (longitude < -180) longitude += 360;
-  if (longitude > 180) longitude -= 360;
+  if (longitude < -180) {
+    longitude += 360;
+  }
+
+  if (longitude > 180) {
+    longitude -= 360;
+  }
 
   return {
     latitude,

@@ -4,10 +4,10 @@ import { useMemo } from "react";
 import earcut from "earcut";
 
 import {
-    GeoFeature,
-    PolygonCoordinates,
-    Vec3,
-    normalizeGeometry,
+  GeoFeature,
+  PolygonCoordinates,
+  Vec3,
+  normalizeGeometry,
 } from "./utils/ar-utils";
 
 type Props = {
@@ -61,7 +61,7 @@ export default function StateHighlight({
   }
 
   return (
-    <ViroNode position={earthPosition} rotation={sphereRotation}>
+    <ViroNode position={earthPosition}>
       {geometries.map((geometry, index) => (
         <ViroGeometry
           key={`state-highlight-${index}`}
@@ -261,13 +261,13 @@ function createPolygonGeometry(
  *
  * Existing:
  *
- * latitude  = -asin(y)
- * longitude = atan2(x, -z) - 90
+ * latitude  = asin(y)
+ * longitude = atan2(z, x)
  *
  * Therefore:
  *
  * x = radius * cos(latitude) * cos(longitude)
- * y = -radius * sin(latitude)
+ * y = radius * sin(latitude)
  * z = radius * cos(latitude) * sin(longitude)
  */
 function latLonToEarthVector(
