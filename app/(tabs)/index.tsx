@@ -8,7 +8,6 @@ import {
   ViroSphere,
 } from "@reactvision/react-viro";
 import React, { useRef, useState } from "react";
-import { Alert } from "react-native";
 
 import indiaGeoJson from "../../assets/IND.json";
 
@@ -262,10 +261,10 @@ function MyARScene() {
 
       setSelectedState(null);
 
-      Alert.alert(
-        "No state found",
-        "Tap did not hit a recognized state on the globe.",
-      );
+      // Alert.alert(
+      //   "No state found",
+      //   "Tap did not hit a recognized state on the globe.",
+      // );
     }
 
     // --------------------------------------------------
@@ -398,8 +397,6 @@ function MyARScene() {
   // Render
   // --------------------------------------------------
 
-  console.log("markers:", markers);
-
   return (
     <ViroARScene
       anchorDetectionTypes={["PlanesHorizontal"]}
@@ -482,12 +479,21 @@ function MyARScene() {
           {selectedState && (
             <StateHighlight
               feature={selectedState}
+              color="#FF0000"
+              earthRadius={sphereRadius}
+              earthPosition={[0, sphereRadius, 0]}
+            />
+          )}
+
+          {/* {selectedState && (
+            <StateHighlight
+              feature={selectedState}
               color="#00FFFF"
               earthRadius={sphereRadius}
               earthPosition={[0, sphereRadius, 0]}
               sphereRotation={sphereRotation}
             />
-          )}
+          )} */}
         </ViroNode>
       )}
     </ViroARScene>
