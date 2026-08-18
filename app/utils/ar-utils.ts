@@ -270,3 +270,99 @@ export function normalizeGeometry(
 
   return [];
 }
+
+// =========================================================
+// STATE CENTROID (lat/lon of the largest ring, area-weighted)
+// =========================================================
+
+function shoelaceArea(ring: number[][]): number {
+  let sum = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[i + 1];
+    sum += x1 * y2 - x2 * y1;
+  }
+  return sum / 2;
+}
+
+function ringCentroid(ring: number[][]): {
+  latitude: number;
+  longitude: number;
+} {
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[i + 1];
+    const cross = x1 * y2 - x2 * y1;
+    area += cross;
+    cx += (x1 + x2) * cross;
+    cy += (y1 + y2) * cross;
+  }
+
+  area *= 0.5;
+
+  if (Math.abs(area) < 1e-10) {
+    let sumLon = 0;
+    let sumLat = 0;
+    for (const [lon, lat] of ring) {
+      sumLon += lon;
+      sumLat += lat;
+    }
+    return { longitude: sumLon / ring.length, latitude: sumLat / ring.length };
+  }
+
+  cx /= 6 * area;
+  cy /= 6 * area;
+
+  return { longitude: cx, latitude: cy };
+}
+
+export function computeStateCentroid(
+  feature: GeoFeature,
+): { latitude: number; longitude: number } | null {
+  const geometry: any = feature.geometry;
+
+  const polygons: number[][][][] =
+    geometry.type === "Polygon"
+      ? [geometry.coordinates]
+      : geometry.type === "MultiPolygon"
+        ? geometry.coordinates
+        : [];
+
+  let bestRing: number[][] | null = null;
+  let bestArea = 0;
+
+  for (const polygon of polygons) {
+    const outerRing = polygon[0];
+    if (!outerRing || outerRing.length < 3) continue;
+
+    const area = Math.abs(shoelaceArea(outerRing));
+    if (area > bestArea) {
+      bestArea = area;
+      bestRing = outerRing;
+    }
+  }
+
+  return bestRing ? ringCentroid(bestRing) : null;
+}
+
+// Same inverse mapping StateHighlight.tsx uses — keeps label
+// consistent with where the highlight geometry actually sits.
+export function latLonToSphereVector(
+  latitude: number,
+  longitude: number,
+  radius: number,
+): Vec3 {
+  const lat = (latitude * Math.PI) / 180;
+  const lon = (longitude * Math.PI) / 180;
+  const cosLat = Math.cos(lat);
+
+  return {
+    x: radius * cosLat * Math.cos(lon),
+    y: -radius * Math.sin(lat),
+    z: radius * cosLat * Math.sin(lon),
+  };
+}

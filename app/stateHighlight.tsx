@@ -1,36 +1,51 @@
-import { ViroMaterials, ViroNode, ViroPolyline } from "@reactvision/react-viro";
+import {
+  ViroGeometry,
+  ViroMaterials,
+  ViroNode,
+  ViroText,
+} from "@reactvision/react-viro";
 import { useMemo } from "react";
+
+import earcut from "earcut";
 
 import {
   GeoFeature,
-  normalizeGeometry,
   PolygonCoordinates,
   Vec3,
+  normalizeGeometry,
 } from "./utils/ar-utils";
-
-type Vec3Tuple = [number, number, number];
 
 type Props = {
   feature: GeoFeature | null;
   color?: string;
   earthRadius: number;
-  earthPosition: Vec3Tuple;
+  earthPosition: [number, number, number];
+  sphereRotation: [number, number, number];
+  showLabel?: boolean; // NEW — default true
 };
 
-const BORDER_OFFSET = 0.003;
+type GeometryData = {
+  vertices: [number, number, number][];
+  normals: [number, number, number][];
+  texcoords: [number, number][];
+  triangleIndices: [number, number, number][];
+};
 
-// Keep each ViroPolyline reasonably small.
-// Your Gujarat border has 8715 points.
-const MAX_POINTS_PER_POLYLINE = 200;
+const HIGHLIGHT_OFFSET = 0.001;
+
+// How far above the highlight surface the label floats.
+const LABEL_OFFSET = 0.015;
 
 export default function StateHighlight({
   feature,
-  color = "#FF0000",
+  color = "#FF000066",
   earthRadius,
   earthPosition,
+  sphereRotation,
+  showLabel = true,
 }: Props) {
   const materialName = useMemo(() => {
-    const name = `stateBorder_${color.replace("#", "")}`;
+    const name = `stateHighlight_${color.replace("#", "")}`;
 
     ViroMaterials.createMaterials({
       [name]: {
@@ -43,94 +58,166 @@ export default function StateHighlight({
     return name;
   }, [color]);
 
-  const polylines = useMemo(() => {
+  const geometries = useMemo(() => {
     if (!feature) {
       return [];
     }
 
-    return createStateBorders(feature, earthRadius);
+    return createStateGeometries(feature, earthRadius);
   }, [feature, earthRadius]);
 
-  if (!feature || polylines.length === 0) {
+  /**
+   * Centroid of the LARGEST outer ring (by area), in Earth-local
+   * coordinates, computed with the exact same latLonToEarthVector
+   * conversion the mesh itself uses — so the label can never
+   * drift from the highlighted shape.
+   */
+  const labelPosition = useMemo((): Vec3 | null => {
+    if (!feature) {
+      return null;
+    }
+
+    const polygons = normalizeGeometry(feature.geometry);
+
+    let bestRing: PolygonCoordinates[number] | null = null;
+    let bestArea = 0;
+
+    for (const polygon of polygons) {
+      const outerRing = polygon?.[0];
+
+      if (!outerRing || outerRing.length < 3) {
+        continue;
+      }
+
+      const area = Math.abs(shoelaceArea(outerRing));
+
+      if (area > bestArea) {
+        bestArea = area;
+        bestRing = outerRing;
+      }
+    }
+
+    if (!bestRing) {
+      return null;
+    }
+
+    const centroidLonLat = ringCentroid(bestRing);
+
+    if (!centroidLonLat) {
+      return null;
+    }
+
+    return latLonToEarthVector(
+      centroidLonLat.latitude,
+      centroidLonLat.longitude,
+      earthRadius + LABEL_OFFSET,
+    );
+  }, [feature, earthRadius]);
+
+  const labelText = feature?.properties?.shapeName ?? "";
+
+  // Rough width-per-character estimate since Viro has no
+  // text-measurement API — tweak the multiplier to taste.
+  const chipWidth = Math.max(0.8, labelText.length * 0.11);
+  const chipHeight = 0.5;
+
+  if (!feature || geometries.length === 0) {
     return null;
   }
 
   return (
     <ViroNode position={earthPosition}>
-      {polylines.map((points, index) => {
-        // Never send an empty/single-point array to Viro.
-        if (!points || points.length < 2) {
-          return null;
-        }
+      {geometries.map((geometry, index) => (
+        <ViroGeometry
+          key={`state-highlight-${index}`}
+          vertices={geometry.vertices}
+          normals={geometry.normals}
+          texcoords={geometry.texcoords}
+          triangleIndices={geometry.triangleIndices}
+          materials={[materialName]}
+        />
+      ))}
 
-        return (
-          <ViroPolyline
-            key={`state-border-${index}`}
-            points={points}
-            thickness={0.0009}
-            materials={[materialName]}
+      {showLabel && labelPosition && labelText.length > 0 && (
+        <ViroNode
+          position={[labelPosition.x, labelPosition.y, labelPosition.z]}
+          scale={[0.1, 0.1, 0.1]}
+          transformBehaviors={["billboard"]}
+        >
+          <ViroText
+            text={labelText}
+            width={chipWidth}
+            height={chipHeight}
+            style={{
+              fontSize: 8,
+              color: "#f10505",
+              fontFamily: "Arial",
+              fontWeight: "bold",
+              textAlign: "center",
+              textAlignVertical: "center",
+            }}
+            extrusionDepth={0}
           />
-        );
-      })}
+        </ViroNode>
+      )}
     </ViroNode>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/*                         CREATE STATE BORDERS                               */
+/*                       CREATE STATE GEOMETRY                                */
 /* -------------------------------------------------------------------------- */
 
-function createStateBorders(
+function createStateGeometries(
   feature: GeoFeature,
   earthRadius: number,
-): Vec3Tuple[][] {
+): GeometryData[] {
   const polygons = normalizeGeometry(feature.geometry);
 
-  const result: Vec3Tuple[][] = [];
+  const result: GeometryData[] = [];
 
-  for (let polygonIndex = 0; polygonIndex < polygons.length; polygonIndex++) {
-    const polygon = polygons[polygonIndex];
+  for (const polygon of polygons) {
+    const geometry = createPolygonGeometry(polygon, earthRadius);
 
-    const polygonPolylines = createPolygonBorders(polygon, earthRadius);
-
-    result.push(...polygonPolylines);
+    if (geometry) {
+      result.push(geometry);
+    }
   }
 
   return result;
 }
 
 /* -------------------------------------------------------------------------- */
-/*                         POLYGON → POLYLINES                                */
+/*                         POLYGON → GEOMETRY                                 */
 /* -------------------------------------------------------------------------- */
 
-function createPolygonBorders(
+function createPolygonGeometry(
   polygon: PolygonCoordinates,
   earthRadius: number,
-): Vec3Tuple[][] {
-  if (!polygon || !Array.isArray(polygon)) {
-    return [];
+): GeometryData | null {
+  if (!polygon || polygon.length === 0) {
+    return null;
   }
 
-  const result: Vec3Tuple[][] = [];
+  const validRings = polygon.filter(isValidRing);
 
-  for (let ringIndex = 0; ringIndex < polygon.length; ringIndex++) {
-    const ring = polygon[ringIndex];
+  if (validRings.length === 0) {
+    return null;
+  }
 
-    if (!Array.isArray(ring)) {
-      continue;
+  const flatCoordinates: number[] = [];
+  const holeIndices: number[] = [];
+
+  let vertexCount = 0;
+
+  for (let ringIndex = 0; ringIndex < validRings.length; ringIndex++) {
+    const ring = validRings[ringIndex];
+
+    if (ringIndex > 0) {
+      holeIndices.push(vertexCount);
     }
 
-    const points: Vec3Tuple[] = [];
-
     for (const coordinate of ring) {
-      if (!Array.isArray(coordinate)) {
-        continue;
-      }
-
-      if (coordinate.length < 2) {
-        continue;
-      }
-
       const longitude = Number(coordinate[0]);
       const latitude = Number(coordinate[1]);
 
@@ -138,80 +225,76 @@ function createPolygonBorders(
         continue;
       }
 
-      const point = latLonToEarthVector(
-        latitude,
-        longitude,
-        earthRadius + BORDER_OFFSET,
-      );
+      flatCoordinates.push(longitude, latitude);
 
-      points.push([point.x, point.y, point.z]);
+      vertexCount++;
     }
+  }
 
-    if (points.length < 2) {
+  if (vertexCount < 3) {
+    return null;
+  }
+
+  const triangleIndices = earcut(flatCoordinates, holeIndices, 2);
+
+  if (!triangleIndices || triangleIndices.length === 0) {
+    return null;
+  }
+
+  const vertices: [number, number, number][] = [];
+  const normals: [number, number, number][] = [];
+  const texcoords: [number, number][] = [];
+
+  for (let i = 0; i < flatCoordinates.length; i += 2) {
+    const longitude = flatCoordinates[i];
+    const latitude = flatCoordinates[i + 1];
+
+    const point = latLonToEarthVector(
+      latitude,
+      longitude,
+      earthRadius + HIGHLIGHT_OFFSET,
+    );
+
+    vertices.push([point.x, point.y, point.z]);
+
+    const normal = normalizeVector(point);
+
+    normals.push([normal.x, normal.y, normal.z]);
+
+    const u = (longitude + 180) / 360;
+    const v = (latitude + 90) / 180;
+
+    texcoords.push([u, v]);
+  }
+
+  const viroTriangles: [number, number, number][] = [];
+
+  for (let i = 0; i < triangleIndices.length; i += 3) {
+    const a = triangleIndices[i];
+    const b = triangleIndices[i + 1];
+    const c = triangleIndices[i + 2];
+
+    if (a === undefined || b === undefined || c === undefined) {
       continue;
     }
 
-    /*
-     * Split a large GeoJSON ring into smaller ViroPolylines.
-     *
-     * Example:
-     *
-     * 8715 points
-     *       ↓
-     * ~44 polylines
-     *       ↓
-     * each max 200 points
-     */
-    const chunks = splitPolyline(points, MAX_POINTS_PER_POLYLINE);
-
-    result.push(...chunks);
+    viroTriangles.push([a, b, c]);
   }
 
-  return result;
+  if (viroTriangles.length === 0) {
+    return null;
+  }
+
+  return {
+    vertices,
+    normals,
+    texcoords,
+    triangleIndices: viroTriangles,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
-/*                         SPLIT POLYLINE                                     */
-/* -------------------------------------------------------------------------- */
-
-function splitPolyline(points: Vec3Tuple[], maxPoints: number): Vec3Tuple[][] {
-  if (points.length < 2) {
-    return [];
-  }
-
-  if (points.length <= maxPoints) {
-    return [points];
-  }
-
-  const result: Vec3Tuple[][] = [];
-
-  /*
-   * We overlap the last point of the previous chunk
-   * with the first point of the next chunk.
-   *
-   * This prevents visible gaps between chunks.
-   */
-  const step = maxPoints - 1;
-
-  for (let start = 0; start < points.length - 1; start += step) {
-    const end = Math.min(start + maxPoints, points.length);
-
-    const chunk = points.slice(start, end);
-
-    if (chunk.length >= 2) {
-      result.push(chunk);
-    }
-
-    if (end >= points.length) {
-      break;
-    }
-  }
-
-  return result;
-}
-
-/* -------------------------------------------------------------------------- */
-/*                         LAT/LON → EARTH                                    */
+/*                         EARTH COORDINATES                                  */
 /* -------------------------------------------------------------------------- */
 
 function latLonToEarthVector(
@@ -226,9 +309,124 @@ function latLonToEarthVector(
 
   return {
     x: radius * cosLat * Math.cos(lon),
-
     y: -radius * Math.sin(lat),
-
     z: radius * cosLat * Math.sin(lon),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              NORMAL                                        */
+/* -------------------------------------------------------------------------- */
+
+function normalizeVector(vector: Vec3): Vec3 {
+  const length = Math.sqrt(
+    vector.x * vector.x + vector.y * vector.y + vector.z * vector.z,
+  );
+
+  if (length === 0) {
+    return { x: 0, y: 0, z: 0 };
+  }
+
+  return {
+    x: vector.x / length,
+    y: vector.y / length,
+    z: vector.z / length,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                        CENTROID (shoelace, ring-based)                     */
+/* -------------------------------------------------------------------------- */
+
+function shoelaceArea(ring: readonly (readonly number[])[]): number {
+  let sum = 0;
+
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[i + 1];
+    sum += x1 * y2 - x2 * y1;
+  }
+
+  return sum / 2;
+}
+
+function ringCentroid(
+  ring: readonly (readonly number[])[],
+): { latitude: number; longitude: number } | null {
+  if (ring.length < 3) {
+    return null;
+  }
+
+  // Force-close the ring — GeoJSON doesn't always guarantee
+  // the last point duplicates the first.
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  const closedRing =
+    first[0] !== last[0] || first[1] !== last[1] ? [...ring, first] : ring;
+
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+
+  for (let i = 0; i < closedRing.length - 1; i++) {
+    const [x1, y1] = closedRing[i];
+    const [x2, y2] = closedRing[i + 1];
+    const cross = x1 * y2 - x2 * y1;
+    area += cross;
+    cx += (x1 + x2) * cross;
+    cy += (y1 + y2) * cross;
+  }
+
+  area *= 0.5;
+
+  if (Math.abs(area) < 1e-10) {
+    let sumLon = 0;
+    let sumLat = 0;
+
+    for (const [lon, lat] of closedRing) {
+      sumLon += lon;
+      sumLat += lat;
+    }
+
+    return {
+      longitude: sumLon / closedRing.length,
+      latitude: sumLat / closedRing.length,
+    };
+  }
+
+  cx /= 6 * area;
+  cy /= 6 * area;
+
+  return { longitude: cx, latitude: cy };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              VALIDATION                                    */
+/* -------------------------------------------------------------------------- */
+
+function isValidRing(ring: unknown): boolean {
+  if (!Array.isArray(ring)) {
+    return false;
+  }
+
+  if (ring.length < 3) {
+    return false;
+  }
+
+  let validPoints = 0;
+
+  for (const coordinate of ring) {
+    if (!Array.isArray(coordinate) || coordinate.length < 2) {
+      continue;
+    }
+
+    const longitude = Number(coordinate[0]);
+    const latitude = Number(coordinate[1]);
+
+    if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
+      validPoints++;
+    }
+  }
+
+  return validPoints >= 3;
 }

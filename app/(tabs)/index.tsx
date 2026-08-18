@@ -2,7 +2,6 @@ import {
   ViroARPlaneSelector,
   ViroARScene,
   ViroARSceneNavigator,
-  ViroImage,
   ViroMaterials,
   ViroNode,
   ViroSphere,
@@ -12,7 +11,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import indiaGeoJson from "../../assets/IND.json";
 
-import NetworkArc from "../NetworkArc";
+import StateHighlight from "../stateHighlight";
 import {
   findStateAtCoordinate,
   GeoFeature,
@@ -46,12 +45,13 @@ const SPHERE_RADIUS = 0.5;
 
 const SPHERE_ROTATION: [number, number, number] = [0, 0, 180];
 
-/**
- * VERY SMALL offset so the marker/route
- * sits just above the texture.
- */
 const ROUTE_SURFACE_OFFSET = 0.002;
 const MARKER_SURFACE_OFFSET = 0.002;
+
+/**
+ * Distance from Earth surface to state text.
+ */
+const STATE_TEXT_OFFSET = 0.06;
 
 const AIRPLANE_ROTATION_OFFSET: [number, number, number] = [0, 0, 0];
 
@@ -72,7 +72,10 @@ function MyARScene() {
 
   const [markers, setMarkers] = useState<SphereMarker[]>([]);
 
-  const [, setSelectedState] = useState<GeoFeature | null>(null);
+  /**
+   * Currently selected state.
+   */
+  const [selectedState, setSelectedState] = useState<GeoFeature | null>(null);
 
   const [earthPosition, setEarthPosition] = useState<
     [number, number, number] | null
@@ -354,6 +357,7 @@ function MyARScene() {
 
     if (animationRef.current) {
       clearInterval(animationRef.current);
+
       animationRef.current = null;
     }
 
@@ -430,12 +434,14 @@ function MyARScene() {
 
     const earthLocal: Vec3 = {
       x: unrotated.x / earthScale,
+
       y: unrotated.y / earthScale,
+
       z: unrotated.z / earthScale,
     };
 
     // =======================================================
-    // RELATIVE TO ACTUAL SPHERE CENTER
+    // RELATIVE TO SPHERE CENTER
     // =======================================================
 
     const fromSphereCenter: Vec3 = {
@@ -483,7 +489,7 @@ function MyARScene() {
     ];
 
     // =======================================================
-    // LAT/LNG
+    // LATITUDE / LONGITUDE
     // =======================================================
 
     const { latitude, longitude } = surfacePointToLatLng(
@@ -492,7 +498,7 @@ function MyARScene() {
     );
 
     // =======================================================
-    // STATE
+    // FIND STATE
     // =======================================================
 
     const detectedState = findStateAtCoordinate(
@@ -500,6 +506,10 @@ function MyARScene() {
       longitude,
       (indiaGeoJson as any).features as GeoFeature[],
     );
+
+    // =======================================================
+    // STATE TEXT
+    // =======================================================
 
     if (detectedState) {
       setSelectedState(detectedState);
@@ -509,13 +519,6 @@ function MyARScene() {
 
     // =======================================================
     // MARKER
-    //
-    // IMPORTANT:
-    //
-    // Marker position is in the SAME local coordinate
-    // system as the ViroSphere.
-    //
-    // The offset is now extremely small.
     // =======================================================
 
     const markerSurface = SPHERE_RADIUS + MARKER_SURFACE_OFFSET;
@@ -655,8 +658,9 @@ function MyARScene() {
           onPinch={handlePinch}
         >
           {/* =================================================
-      EARTH
-  ================================================= */}
+              EARTH SPHERE
+          ================================================= */}
+
           <ViroSphere
             heightSegmentCount={20}
             widthSegmentCount={20}
@@ -667,10 +671,12 @@ function MyARScene() {
             highAccuracyEvents
             onClickState={handleSphereClick}
           />
+
           {/* =================================================
-      MARKERS
-  ================================================= */}
-          {routePoints.map((point) => {
+              MARKERS
+          ================================================= */}
+
+          {/* {routePoints.map((point) => {
             const position: Vec3Tuple = [
               point.position[0],
               point.position[1] - 0.02,
@@ -690,21 +696,13 @@ function MyARScene() {
                 />
               </ViroNode>
             );
-          })}
-          {/* {routePoints.map((point, index) => (
-            <MarkerPin
-              key={point.id}
-              position={point.position}
-              normal={point.normal}
-              material={index === 0 ? "pointBMaterial" : "pointBMaterial"}
-              targetLength={0.1}
-              radius={0.006}
-            />
-          ))} */}
+          })} */}
+
           {/* =================================================
-      NETWORK ARC
-  ================================================= */}
-          {routePoints.length === 2 && (
+              NETWORK ARC
+          ================================================= */}
+
+          {/* {routePoints.length === 2 && (
             <NetworkArc
               from={routePoints[0]}
               to={routePoints[1]}
@@ -719,6 +717,29 @@ function MyARScene() {
               thickness={0.003}
               material="routeMaterial"
               animationDuration={1200}
+            />
+          )} */}
+
+          {/* ------------------------------------------------ */}
+          {/* State Highlight                                  */}
+          {/* ------------------------------------------------ */}
+
+          {/* {selectedState && (
+            <StateHighlightPolyline
+              feature={selectedState}
+              color="#FF0000"
+              earthRadius={SPHERE_RADIUS}
+              earthPosition={[0, SPHERE_RADIUS, 0]}
+            />
+          )} */}
+
+          {selectedState && (
+            <StateHighlight
+              feature={selectedState}
+              color="#00FFFF"
+              earthRadius={SPHERE_RADIUS}
+              earthPosition={[0, SPHERE_RADIUS, 0]}
+              sphereRotation={SPHERE_ROTATION}
             />
           )}
         </ViroNode>
@@ -753,6 +774,15 @@ ViroMaterials.createMaterials({
 
   routeMaterial: {
     diffuseColor: "#00BFFF",
+    lightingModel: "Constant",
+  },
+
+  /**
+   * Material for the selected
+   * state name.
+   */
+  stateTextMaterial: {
+    diffuseColor: "#FFFFFF",
     lightingModel: "Constant",
   },
 });
