@@ -2,20 +2,20 @@ import {
   ViroARPlaneSelector,
   ViroARScene,
   ViroARSceneNavigator,
-  ViroBox,
+  ViroImage,
   ViroMaterials,
   ViroNode,
   ViroSphere,
 } from "@reactvision/react-viro";
-import React, { useRef, useState } from "react";
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import indiaGeoJson from "../../assets/IND.json";
 
-import StateHighlight from "../stateHighlight";
+import NetworkArc from "../NetworkArc";
 import {
   findStateAtCoordinate,
   GeoFeature,
-  normalizeVector,
   surfacePointToLatLng,
   Vec3,
 } from "../utils/ar-utils";
@@ -24,17 +24,38 @@ type Vec3Tuple = [number, number, number];
 
 type SphereMarker = {
   id: string;
-
-  // IMPORTANT:
-  // Marker position is EARTH-LOCAL coordinates.
   position: Vec3Tuple;
-
-  // IMPORTANT:
-  // Marker end is also EARTH-LOCAL coordinates.
-  end: Vec3Tuple;
+  latitude: number;
+  longitude: number;
+  stateName?: string;
 };
 
-export default function ViroExample() {
+type RoutePoint = {
+  id: string;
+  position: Vec3Tuple;
+  normal: Vec3Tuple;
+  latitude: number;
+  longitude: number;
+  stateName?: string;
+};
+
+const MIN_SCALE = 0.5;
+const MAX_SCALE = 3;
+
+const SPHERE_RADIUS = 0.5;
+
+const SPHERE_ROTATION: [number, number, number] = [0, 0, 180];
+
+/**
+ * VERY SMALL offset so the marker/route
+ * sits just above the texture.
+ */
+const ROUTE_SURFACE_OFFSET = 0.002;
+const MARKER_SURFACE_OFFSET = 0.002;
+
+const AIRPLANE_ROTATION_OFFSET: [number, number, number] = [0, 0, 0];
+
+export default function Earth() {
   return (
     <ViroARSceneNavigator
       worldMeshEnabled
@@ -51,7 +72,7 @@ function MyARScene() {
 
   const [markers, setMarkers] = useState<SphereMarker[]>([]);
 
-  const [selectedState, setSelectedState] = useState<GeoFeature | null>(null);
+  const [, setSelectedState] = useState<GeoFeature | null>(null);
 
   const [earthPosition, setEarthPosition] = useState<
     [number, number, number] | null
@@ -59,42 +80,43 @@ function MyARScene() {
 
   const [earthScale, setEarthScale] = useState(1);
 
-  const MIN_SCALE = 0.5;
-  const MAX_SCALE = 3;
+  const [routePoints, setRoutePoints] = useState<RoutePoint[]>([]);
 
-  // --------------------------------------------------
-  // Sphere parameters
-  // --------------------------------------------------
+  const [routeProgress, setRouteProgress] = useState(0);
 
-  const sphereRadius = 0.5;
+  const animationRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Keep your existing Earth rotation.
-  const sphereRotation: [number, number, number] = [0, 0, 180];
+  // =========================================================
+  // SPHERE CENTER
+  // =========================================================
 
-  // --------------------------------------------------
-  // Rotate vector by Euler rotation
-  // --------------------------------------------------
+  const sphereLocalCenter: Vec3 = {
+    x: 0,
+    y: SPHERE_RADIUS,
+    z: 0,
+  };
+
+  // =========================================================
+  // ROTATE VECTOR
+  // =========================================================
 
   const rotateVector = (v: Vec3, euler: [number, number, number]): Vec3 => {
     const radX = (euler[0] * Math.PI) / 180;
     const radY = (euler[1] * Math.PI) / 180;
     const radZ = (euler[2] * Math.PI) / 180;
 
-    // RX
     const y1 = v.y * Math.cos(radX) - v.z * Math.sin(radX);
 
     const z1 = v.y * Math.sin(radX) + v.z * Math.cos(radX);
 
     const x1 = v.x;
 
-    // RY
     const x2 = x1 * Math.cos(radY) + z1 * Math.sin(radY);
 
     const z2 = -x1 * Math.sin(radY) + z1 * Math.cos(radY);
 
     const y2 = y1;
 
-    // RZ
     const x3 = x2 * Math.cos(radZ) - y2 * Math.sin(radZ);
 
     const y3 = x2 * Math.sin(radZ) + y2 * Math.cos(radZ);
@@ -108,11 +130,267 @@ function MyARScene() {
     };
   };
 
-  // --------------------------------------------------
-  // Sphere click
-  // --------------------------------------------------
+  // =========================================================
+  // NORMALIZE
+  // =========================================================
 
-  const _handleSphereClick = (
+  const normalize = (v: Vec3): Vec3 => {
+    const length = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+
+    if (!Number.isFinite(length) || length < 0.000001) {
+      return {
+        x: 0,
+        y: 1,
+        z: 0,
+      };
+    }
+
+    return {
+      x: v.x / length,
+      y: v.y / length,
+      z: v.z / length,
+    };
+  };
+
+  // =========================================================
+  // DOT
+  // =========================================================
+
+  const dot = (a: Vec3, b: Vec3): number => {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+  };
+
+  // =========================================================
+  // SLERP
+  // =========================================================
+
+  const slerp = (a: Vec3, b: Vec3, t: number): Vec3 => {
+    const na = normalize(a);
+    const nb = normalize(b);
+
+    let cosTheta = dot(na, nb);
+
+    cosTheta = Math.max(-1, Math.min(1, cosTheta));
+
+    const theta = Math.acos(cosTheta);
+
+    if (theta < 0.00001) {
+      return normalize({
+        x: na.x + (nb.x - na.x) * t,
+        y: na.y + (nb.y - na.y) * t,
+        z: na.z + (nb.z - na.z) * t,
+      });
+    }
+
+    const sinTheta = Math.sin(theta);
+
+    const weightA = Math.sin((1 - t) * theta) / sinTheta;
+
+    const weightB = Math.sin(t * theta) / sinTheta;
+
+    return normalize({
+      x: na.x * weightA + nb.x * weightB,
+
+      y: na.y * weightA + nb.y * weightB,
+
+      z: na.z * weightA + nb.z * weightB,
+    });
+  };
+
+  // =========================================================
+  // CREATE GREAT CIRCLE ROUTE
+  // =========================================================
+
+  const createGreatCircleRoute = (
+    start: Vec3,
+    end: Vec3,
+    segments = 100,
+  ): Vec3Tuple[] => {
+    const points: Vec3Tuple[] = [];
+
+    const startVector: Vec3 = {
+      x: start.x - sphereLocalCenter.x,
+
+      y: start.y - sphereLocalCenter.y,
+
+      z: start.z - sphereLocalCenter.z,
+    };
+
+    const endVector: Vec3 = {
+      x: end.x - sphereLocalCenter.x,
+
+      y: end.y - sphereLocalCenter.y,
+
+      z: end.z - sphereLocalCenter.z,
+    };
+
+    const routeRadius = SPHERE_RADIUS + ROUTE_SURFACE_OFFSET;
+
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+
+      const interpolated = slerp(startVector, endVector, t);
+
+      const n = normalize(interpolated);
+
+      points.push([
+        sphereLocalCenter.x + n.x * routeRadius,
+
+        sphereLocalCenter.y + n.y * routeRadius,
+
+        sphereLocalCenter.z + n.z * routeRadius,
+      ]);
+    }
+
+    return points;
+  };
+
+  // =========================================================
+  // COMPLETE ROUTE
+  // =========================================================
+
+  const completeRoute = useMemo(() => {
+    if (routePoints.length !== 2) {
+      return [];
+    }
+
+    const start: Vec3 = {
+      x: routePoints[0].position[0],
+      y: routePoints[0].position[1],
+      z: routePoints[0].position[2],
+    };
+
+    const end: Vec3 = {
+      x: routePoints[1].position[0],
+      y: routePoints[1].position[1],
+      z: routePoints[1].position[2],
+    };
+
+    return createGreatCircleRoute(start, end, 100);
+  }, [routePoints]);
+
+  // =========================================================
+  // VISIBLE ROUTE
+  // =========================================================
+
+  const visibleRoute = useMemo(() => {
+    if (completeRoute.length === 0) {
+      return [];
+    }
+
+    const maxIndex = Math.max(
+      1,
+      Math.floor(routeProgress * (completeRoute.length - 1)),
+    );
+
+    return completeRoute.slice(0, maxIndex + 1);
+  }, [completeRoute, routeProgress]);
+
+  // =========================================================
+  // AIRPLANE POSITION
+  // =========================================================
+
+  const movingPlanePosition = useMemo(() => {
+    if (routePoints.length !== 2 || completeRoute.length < 2) {
+      return null;
+    }
+
+    const index = Math.min(
+      completeRoute.length - 1,
+      Math.floor(routeProgress * (completeRoute.length - 1)),
+    );
+
+    return completeRoute[index];
+  }, [routePoints, completeRoute, routeProgress]);
+
+  // =========================================================
+  // AIRPLANE ROTATION
+  // =========================================================
+
+  const movingPlaneRotation = useMemo(() => {
+    if (routePoints.length !== 2 || completeRoute.length < 2) {
+      return AIRPLANE_ROTATION_OFFSET;
+    }
+
+    const rawIndex = Math.floor(routeProgress * (completeRoute.length - 1));
+
+    const index = Math.min(completeRoute.length - 2, Math.max(0, rawIndex));
+
+    const current = completeRoute[index];
+
+    const next = completeRoute[index + 1];
+
+    const dx = next[0] - current[0];
+    const dy = next[1] - current[1];
+    const dz = next[2] - current[2];
+
+    const horizontalLength = Math.sqrt(dx * dx + dz * dz);
+
+    if (horizontalLength < 0.00001) {
+      return AIRPLANE_ROTATION_OFFSET;
+    }
+
+    const yaw = (Math.atan2(dx, dz) * 180) / Math.PI;
+
+    const pitch = (-Math.atan2(dy, horizontalLength) * 180) / Math.PI;
+
+    return [
+      pitch + AIRPLANE_ROTATION_OFFSET[0],
+
+      yaw + AIRPLANE_ROTATION_OFFSET[1],
+
+      AIRPLANE_ROTATION_OFFSET[2],
+    ];
+  }, [routePoints.length, completeRoute, routeProgress]);
+
+  // =========================================================
+  // ROUTE ANIMATION
+  // =========================================================
+
+  useEffect(() => {
+    if (routePoints.length !== 2 || completeRoute.length < 2) {
+      return;
+    }
+
+    if (animationRef.current) {
+      clearInterval(animationRef.current);
+      animationRef.current = null;
+    }
+
+    setRouteProgress(0);
+
+    let progress = 0;
+
+    animationRef.current = setInterval(() => {
+      progress += 0.015;
+
+      if (progress >= 1) {
+        progress = 1;
+
+        if (animationRef.current) {
+          clearInterval(animationRef.current);
+
+          animationRef.current = null;
+        }
+      }
+
+      setRouteProgress(progress);
+    }, 40);
+
+    return () => {
+      if (animationRef.current) {
+        clearInterval(animationRef.current);
+
+        animationRef.current = null;
+      }
+    };
+  }, [routePoints, completeRoute.length]);
+
+  // =========================================================
+  // SPHERE CLICK
+  // =========================================================
+
+  const handleSphereClick = (
     clickState: number,
     clickPos: [number, number, number] | null | undefined,
   ) => {
@@ -120,15 +398,9 @@ function MyARScene() {
       return;
     }
 
-    console.log("================================");
-    console.log("🌎 RAW WORLD CLICK:", clickPos);
-    console.log("🌎 EARTH POSITION:", earthPosition);
-    console.log("🌎 EARTH SCALE:", earthScale);
-    console.log("🌎 EARTH ROTATION:", sphereRotation);
-
-    // --------------------------------------------------
-    // 1. Click position is WORLD coordinates
-    // --------------------------------------------------
+    if (!clickPos.every(Number.isFinite)) {
+      return;
+    }
 
     const worldClick: Vec3 = {
       x: clickPos[0],
@@ -136,11 +408,10 @@ function MyARScene() {
       z: clickPos[2],
     };
 
-    // --------------------------------------------------
-    // 2. WORLD -> EARTH NODE LOCAL
-    // --------------------------------------------------
+    // =======================================================
+    // WORLD -> EARTH NODE LOCAL
+    // =======================================================
 
-    // Remove Earth node translation.
     const translated: Vec3 = {
       x: worldClick.x - earthPosition[0],
 
@@ -149,40 +420,23 @@ function MyARScene() {
       z: worldClick.z - earthPosition[2],
     };
 
-    // Undo Earth rotation.
     const inverseRotation: [number, number, number] = [
-      -sphereRotation[0],
-      -sphereRotation[1],
-      -sphereRotation[2],
+      -SPHERE_ROTATION[0],
+      -SPHERE_ROTATION[1],
+      -SPHERE_ROTATION[2],
     ];
 
     const unrotated = rotateVector(translated, inverseRotation);
 
-    // Undo Earth scale.
     const earthLocal: Vec3 = {
       x: unrotated.x / earthScale,
       y: unrotated.y / earthScale,
       z: unrotated.z / earthScale,
     };
 
-    console.log("📐 EARTH LOCAL CLICK:", earthLocal);
-
-    // --------------------------------------------------
-    // 3. Sphere center in Earth-local coordinates
-    //
-    // ViroSphere:
-    // position={[0, sphereRadius, 0]}
-    // --------------------------------------------------
-
-    const sphereLocalCenter: Vec3 = {
-      x: 0,
-      y: sphereRadius,
-      z: 0,
-    };
-
-    // --------------------------------------------------
-    // 4. Click relative to sphere center
-    // --------------------------------------------------
+    // =======================================================
+    // RELATIVE TO ACTUAL SPHERE CENTER
+    // =======================================================
 
     const fromSphereCenter: Vec3 = {
       x: earthLocal.x - sphereLocalCenter.x,
@@ -192,24 +446,21 @@ function MyARScene() {
       z: earthLocal.z - sphereLocalCenter.z,
     };
 
-    console.log("🌐 FROM SPHERE CENTER:", fromSphereCenter);
-
-    // --------------------------------------------------
-    // 5. Project click onto sphere surface
-    // --------------------------------------------------
-
     const distance = Math.sqrt(
       fromSphereCenter.x * fromSphereCenter.x +
         fromSphereCenter.y * fromSphereCenter.y +
         fromSphereCenter.z * fromSphereCenter.z,
     );
 
-    if (distance === 0) {
-      console.log("❌ Click is at sphere center");
+    if (!Number.isFinite(distance) || distance < 0.000001) {
       return;
     }
 
-    const projectionScale = sphereRadius / distance;
+    // =======================================================
+    // EXACT EARTH SURFACE
+    // =======================================================
+
+    const projectionScale = SPHERE_RADIUS / distance;
 
     const surfaceLocal: Vec3 = {
       x: fromSphereCenter.x * projectionScale,
@@ -219,25 +470,30 @@ function MyARScene() {
       z: fromSphereCenter.z * projectionScale,
     };
 
-    console.log("📍 SPHERE LOCAL SURFACE:", surfaceLocal);
+    // =======================================================
+    // OUTWARD NORMAL
+    // =======================================================
 
-    // --------------------------------------------------
-    // 6. Latitude / Longitude
-    // --------------------------------------------------
+    const surfaceNormalVec = normalize(surfaceLocal);
+
+    const surfaceNormal: Vec3Tuple = [
+      surfaceNormalVec.x,
+      surfaceNormalVec.y,
+      surfaceNormalVec.z,
+    ];
+
+    // =======================================================
+    // LAT/LNG
+    // =======================================================
 
     const { latitude, longitude } = surfacePointToLatLng(
       surfaceLocal,
-      sphereRadius,
+      SPHERE_RADIUS,
     );
 
-    console.log("🌍 LAT/LNG:", {
-      latitude,
-      longitude,
-    });
-
-    // --------------------------------------------------
-    // 7. Find state from GeoJSON
-    // --------------------------------------------------
+    // =======================================================
+    // STATE
+    // =======================================================
 
     const detectedState = findStateAtCoordinate(
       latitude,
@@ -245,135 +501,92 @@ function MyARScene() {
       (indiaGeoJson as any).features as GeoFeature[],
     );
 
-    console.log("🌍 TAP LOCATION:", {
-      latitude,
-      longitude,
-      country: detectedState?.properties.shapeGroup ?? null,
-      state: detectedState?.properties.shapeName ?? null,
-    });
-
     if (detectedState) {
-      console.log("✅ SELECTED STATE:", detectedState.properties.shapeName);
-
       setSelectedState(detectedState);
     } else {
-      console.log("❌ NO STATE FOUND");
-
       setSelectedState(null);
-
-      // Alert.alert(
-      //   "No state found",
-      //   "Tap did not hit a recognized state on the globe.",
-      // );
     }
 
-    // --------------------------------------------------
-    // 8. Surface -> EARTH NODE LOCAL
+    // =======================================================
+    // MARKER
     //
     // IMPORTANT:
     //
-    // The marker is rendered INSIDE the Earth ViroNode.
+    // Marker position is in the SAME local coordinate
+    // system as the ViroSphere.
     //
-    // Therefore this must remain LOCAL.
-    // --------------------------------------------------
+    // The offset is now extremely small.
+    // =======================================================
 
-    const sphereSurfaceInEarthLocal: Vec3 = {
-      x: surfaceLocal.x,
+    const markerSurface = SPHERE_RADIUS + MARKER_SURFACE_OFFSET;
 
-      y: surfaceLocal.y + sphereRadius,
+    const markerPosition: Vec3Tuple = [
+      sphereLocalCenter.x + surfaceNormalVec.x * markerSurface,
 
-      z: surfaceLocal.z,
+      sphereLocalCenter.y + surfaceNormalVec.y * markerSurface,
+
+      sphereLocalCenter.z + surfaceNormalVec.z * markerSurface,
+    ];
+
+    // =======================================================
+    // ROUTE POINT
+    // =======================================================
+
+    const id = `${Date.now()}-${Math.random()}`;
+
+    const newRoutePoint: RoutePoint = {
+      id,
+      position: markerPosition,
+      normal: surfaceNormal,
+      latitude,
+      longitude,
+      stateName: detectedState?.properties.shapeName,
     };
 
-    console.log("📍 MARKER EARTH-LOCAL:", sphereSurfaceInEarthLocal);
+    // =======================================================
+    // ROUTE POINTS
+    // =======================================================
 
-    // --------------------------------------------------
-    // 9. Optional WORLD conversion
-    //
-    // This is ONLY for debugging.
-    //
-    // DO NOT use worldSurface as
-    // ViroBox position.
-    // --------------------------------------------------
+    setRoutePoints((previousPoints) => {
+      if (previousPoints.length === 0) {
+        setRouteProgress(0);
 
-    const scaledSurface: Vec3 = {
-      x: sphereSurfaceInEarthLocal.x * earthScale,
+        return [newRoutePoint];
+      }
 
-      y: sphereSurfaceInEarthLocal.y * earthScale,
+      if (previousPoints.length === 1) {
+        return [previousPoints[0], newRoutePoint];
+      }
 
-      z: sphereSurfaceInEarthLocal.z * earthScale,
+      setRouteProgress(0);
+
+      return [newRoutePoint];
+    });
+
+    // =======================================================
+    // MARKERS
+    // =======================================================
+
+    const newMarker: SphereMarker = {
+      id,
+      position: markerPosition,
+      latitude,
+      longitude,
+      stateName: detectedState?.properties.shapeName,
     };
 
-    const rotatedSurface = rotateVector(scaledSurface, sphereRotation);
+    setMarkers((previousMarkers) => {
+      if (previousMarkers.length >= 2) {
+        return [newMarker];
+      }
 
-    const worldSurface: Vec3Tuple = [
-      rotatedSurface.x + earthPosition[0],
-
-      rotatedSurface.y + earthPosition[1],
-
-      rotatedSurface.z + earthPosition[2],
-    ];
-
-    console.log("🌎 DEBUG WORLD SURFACE:", worldSurface);
-
-    // --------------------------------------------------
-    // 10. LOCAL NORMAL
-    //
-    // IMPORTANT:
-    //
-    // Marker is inside Earth node.
-    //
-    // Do NOT rotate this normal again.
-    // The parent ViroNode already applies
-    // sphereRotation.
-    // --------------------------------------------------
-
-    const localNormal = normalizeVector(surfaceLocal);
-
-    // --------------------------------------------------
-    // 11. Marker
-    //
-    // IMPORTANT:
-    //
-    // position = EARTH LOCAL
-    // end      = EARTH LOCAL
-    // --------------------------------------------------
-
-    const lineLength = 0.08;
-
-    const start: Vec3Tuple = [
-      sphereSurfaceInEarthLocal.x,
-      sphereSurfaceInEarthLocal.y,
-      sphereSurfaceInEarthLocal.z,
-    ];
-
-    const end: Vec3Tuple = [
-      start[0] + localNormal.x * lineLength,
-
-      start[1] + localNormal.y * lineLength,
-
-      start[2] + localNormal.z * lineLength,
-    ];
-
-    setMarkers((prev) => [
-      ...prev,
-      {
-        id: `${Date.now()}-${prev.length}`,
-        position: start,
-        end,
-      },
-    ]);
-
-    console.log("📌 MARKER LOCAL START:", start);
-
-    console.log("📌 MARKER LOCAL END:", end);
-
-    console.log("================================");
+      return [...previousMarkers, newMarker];
+    });
   };
 
-  // --------------------------------------------------
-  // Pinch
-  // --------------------------------------------------
+  // =========================================================
+  // PINCH
+  // =========================================================
 
   const pinchStartScale = useRef(1);
 
@@ -393,9 +606,9 @@ function MyARScene() {
     }
   };
 
-  // --------------------------------------------------
-  // Render
-  // --------------------------------------------------
+  // =========================================================
+  // RENDER
+  // =========================================================
 
   return (
     <ViroARScene
@@ -410,99 +623,113 @@ function MyARScene() {
         anchor && selectorRef.current?.handleAnchorRemoved(anchor);
       }}
     >
-      {/* ------------------------------------------------ */}
-      {/* Plane Selector                                   */}
-      {/* ------------------------------------------------ */}
+      {/* =================================================
+          PLANE SELECTOR
+      ================================================= */}
 
       <ViroARPlaneSelector
         ref={selectorRef}
         alignment="Horizontal"
         minWidth={0.1}
         minHeight={0.1}
-        hideOverlayOnSelection={true}
-        useActualShape={true}
+        hideOverlayOnSelection
+        useActualShape
         onPlaneSelected={(_, tapPosition) => {
           if (!tapPosition) {
             return;
           }
 
-          console.log("🟢 PLANE TAP POSITION:", tapPosition);
-
           setEarthPosition(tapPosition);
         }}
       />
 
-      {/* ------------------------------------------------ */}
-      {/* EARTH                                            */}
-      {/* ------------------------------------------------ */}
+      {/* =================================================
+          EARTH
+      ================================================= */}
 
       {earthPosition && (
         <ViroNode
           position={earthPosition}
-          rotation={sphereRotation}
+          rotation={SPHERE_ROTATION}
           scale={[earthScale, earthScale, earthScale]}
           onPinch={handlePinch}
         >
-          {/* ------------------------------------------------ */}
-          {/* Earth sphere                                     */}
-          {/* ------------------------------------------------ */}
-
+          {/* =================================================
+      EARTH
+  ================================================= */}
           <ViroSphere
             heightSegmentCount={20}
             widthSegmentCount={20}
-            radius={sphereRadius}
-            position={[0, sphereRadius, 0]}
+            radius={SPHERE_RADIUS}
+            position={[0, SPHERE_RADIUS, 0]}
             materials={["earth"]}
-            facesOutward={true}
-            highAccuracyEvents={true}
-            onClickState={_handleSphereClick}
+            facesOutward
+            highAccuracyEvents
+            onClickState={handleSphereClick}
           />
+          {/* =================================================
+      MARKERS
+  ================================================= */}
+          {routePoints.map((point) => {
+            const position: Vec3Tuple = [
+              point.position[0],
+              point.position[1] - 0.02,
+              point.position[2],
+            ];
 
-          {/* ------------------------------------------------ */}
-          {/* Click markers                                    */}
-          {/* ------------------------------------------------ */}
-
-          {markers.map((marker) => (
-            <React.Fragment key={marker.id}>
-              <ViroBox
-                position={marker.position}
-                scale={[0.005, 0.005, 0.005]}
-                materials={["markerMaterial"]}
-              />
-            </React.Fragment>
-          ))}
-
-          {/* ------------------------------------------------ */}
-          {/* State Highlight                                  */}
-          {/* ------------------------------------------------ */}
-
-          {selectedState && (
-            <StateHighlight
-              feature={selectedState}
-              color="#FF0000"
-              earthRadius={sphereRadius}
-              earthPosition={[0, sphereRadius, 0]}
+            return (
+              <ViroNode
+                key={point.id}
+                position={position}
+                transformBehaviors={["billboard"]}
+              >
+                <ViroImage
+                  source={require("../../assets/images/location.png")}
+                  width={0.045}
+                  height={0.045}
+                />
+              </ViroNode>
+            );
+          })}
+          {/* {routePoints.map((point, index) => (
+            <MarkerPin
+              key={point.id}
+              position={point.position}
+              normal={point.normal}
+              material={index === 0 ? "pointBMaterial" : "pointBMaterial"}
+              targetLength={0.1}
+              radius={0.006}
+            />
+          ))} */}
+          {/* =================================================
+      NETWORK ARC
+  ================================================= */}
+          {routePoints.length === 2 && (
+            <NetworkArc
+              from={routePoints[0]}
+              to={routePoints[1]}
+              sphereCenter={[
+                sphereLocalCenter.x,
+                sphereLocalCenter.y,
+                sphereLocalCenter.z,
+              ]}
+              sphereRadius={SPHERE_RADIUS}
+              arcHeight={0.12}
+              segments={80}
+              thickness={0.003}
+              material="routeMaterial"
+              animationDuration={1200}
             />
           )}
-
-          {/* {selectedState && (
-            <StateHighlight
-              feature={selectedState}
-              color="#00FFFF"
-              earthRadius={sphereRadius}
-              earthPosition={[0, sphereRadius, 0]}
-              sphereRotation={sphereRotation}
-            />
-          )} */}
         </ViroNode>
       )}
     </ViroARScene>
   );
 }
 
-// --------------------------------------------------
-// Materials
-// --------------------------------------------------
+// ============================================================
+// MATERIALS
+// ============================================================
 
 ViroMaterials.createMaterials({
   earth: {
@@ -511,5 +738,21 @@ ViroMaterials.createMaterials({
 
   markerMaterial: {
     diffuseColor: "#00FF00",
+    lightingModel: "Constant",
+  },
+
+  pointAMaterial: {
+    diffuseColor: "#FFD700",
+    lightingModel: "Constant",
+  },
+
+  pointBMaterial: {
+    diffuseColor: "#FF3030",
+    lightingModel: "Constant",
+  },
+
+  routeMaterial: {
+    diffuseColor: "#00BFFF",
+    lightingModel: "Constant",
   },
 });
