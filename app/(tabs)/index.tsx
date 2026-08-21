@@ -1,7 +1,9 @@
 import {
+  ViroAmbientLight,
   ViroARPlaneSelector,
   ViroARScene,
   ViroARSceneNavigator,
+  ViroImage,
   ViroMaterials,
   ViroNode,
   ViroSphere,
@@ -11,7 +13,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import indiaGeoJson from "../../assets/IND.json";
 
-import StateHighlight from "../stateHighlight";
+import NetworkArc from "../NetworkArc";
 import {
   findStateAtCoordinate,
   GeoFeature,
@@ -51,9 +53,6 @@ const MARKER_SURFACE_OFFSET = 0.002;
 /**
  * Distance from Earth surface to state text.
  */
-const STATE_TEXT_OFFSET = 0.06;
-
-const AIRPLANE_ROTATION_OFFSET: [number, number, number] = [0, 0, 0];
 
 export default function Earth() {
   return (
@@ -88,6 +87,32 @@ function MyARScene() {
   const [routeProgress, setRouteProgress] = useState(0);
 
   const animationRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // =========================================================
+  // SPIN (rotation gesture)
+  // =========================================================
+
+  const [spinY, setSpinY] = useState(0);
+
+  const spinStart = useRef(0);
+
+  const handleRotate = (
+    rotateState: number,
+    rotationFactor: number,
+    _source?: any,
+  ) => {
+    // rotateState: 1 = start, 2 = rotating, 3 = end
+    if (rotateState === 1) {
+      spinStart.current = spinY;
+      return;
+    }
+
+    if (rotateState === 2) {
+      // Negate rotationFactor here if the spin direction feels
+      // inverted on your device.
+      setSpinY(spinStart.current + rotationFactor);
+    }
+  };
 
   // =========================================================
   // SPHERE CENTER
@@ -273,80 +298,6 @@ function MyARScene() {
   }, [routePoints]);
 
   // =========================================================
-  // VISIBLE ROUTE
-  // =========================================================
-
-  const visibleRoute = useMemo(() => {
-    if (completeRoute.length === 0) {
-      return [];
-    }
-
-    const maxIndex = Math.max(
-      1,
-      Math.floor(routeProgress * (completeRoute.length - 1)),
-    );
-
-    return completeRoute.slice(0, maxIndex + 1);
-  }, [completeRoute, routeProgress]);
-
-  // =========================================================
-  // AIRPLANE POSITION
-  // =========================================================
-
-  const movingPlanePosition = useMemo(() => {
-    if (routePoints.length !== 2 || completeRoute.length < 2) {
-      return null;
-    }
-
-    const index = Math.min(
-      completeRoute.length - 1,
-      Math.floor(routeProgress * (completeRoute.length - 1)),
-    );
-
-    return completeRoute[index];
-  }, [routePoints, completeRoute, routeProgress]);
-
-  // =========================================================
-  // AIRPLANE ROTATION
-  // =========================================================
-
-  const movingPlaneRotation = useMemo(() => {
-    if (routePoints.length !== 2 || completeRoute.length < 2) {
-      return AIRPLANE_ROTATION_OFFSET;
-    }
-
-    const rawIndex = Math.floor(routeProgress * (completeRoute.length - 1));
-
-    const index = Math.min(completeRoute.length - 2, Math.max(0, rawIndex));
-
-    const current = completeRoute[index];
-
-    const next = completeRoute[index + 1];
-
-    const dx = next[0] - current[0];
-    const dy = next[1] - current[1];
-    const dz = next[2] - current[2];
-
-    const horizontalLength = Math.sqrt(dx * dx + dz * dz);
-
-    if (horizontalLength < 0.00001) {
-      return AIRPLANE_ROTATION_OFFSET;
-    }
-
-    const yaw = (Math.atan2(dx, dz) * 180) / Math.PI;
-
-    const pitch = (-Math.atan2(dy, horizontalLength) * 180) / Math.PI;
-
-    return [
-      pitch + AIRPLANE_ROTATION_OFFSET[0],
-
-      yaw + AIRPLANE_ROTATION_OFFSET[1],
-
-      AIRPLANE_ROTATION_OFFSET[2],
-    ];
-  }, [routePoints.length, completeRoute, routeProgress]);
-
-  // =========================================================
   // ROUTE ANIMATION
   // =========================================================
 
@@ -424,10 +375,18 @@ function MyARScene() {
       z: worldClick.z - earthPosition[2],
     };
 
+    // Account for both the base flip AND the live spin gesture
+    // when converting a world click back into earth-local space.
+    const combinedRotation: [number, number, number] = [
+      SPHERE_ROTATION[0],
+      SPHERE_ROTATION[1] + spinY,
+      SPHERE_ROTATION[2],
+    ];
+
     const inverseRotation: [number, number, number] = [
-      -SPHERE_ROTATION[0],
-      -SPHERE_ROTATION[1],
-      -SPHERE_ROTATION[2],
+      -combinedRotation[0],
+      -combinedRotation[1],
+      -combinedRotation[2],
     ];
 
     const unrotated = rotateVector(translated, inverseRotation);
@@ -627,6 +586,15 @@ function MyARScene() {
       }}
     >
       {/* =================================================
+          LIGHTING
+          Required so non-"Constant" lit models (e.g. the
+          OBJ chair/airplane in NetworkArc) don't render
+          pitch black / invisible.
+      ================================================= */}
+
+      <ViroAmbientLight color="#ffffff" influenceBitMask={3} />
+
+      {/* =================================================
           PLANE SELECTOR
       ================================================= */}
 
@@ -653,95 +621,113 @@ function MyARScene() {
       {earthPosition && (
         <ViroNode
           position={earthPosition}
-          rotation={SPHERE_ROTATION}
           scale={[earthScale, earthScale, earthScale]}
           onPinch={handlePinch}
+          onRotate={handleRotate}
+          dragType="FixedDistance"
         >
           {/* =================================================
-              EARTH SPHERE
+              SPIN LAYER
+              Applies the live two-finger twist gesture around
+              a world-relative Y axis.
           ================================================= */}
+          <ViroNode rotation={[0, spinY, 0]}>
+            {/* =================================================
+                BASE ORIENTATION LAYER
+                Your original fixed flip — untouched.
+            ================================================= */}
+            <ViroNode rotation={SPHERE_ROTATION}>
+              {/* =================================================
+                  EARTH SPHERE
+              ================================================= */}
 
-          <ViroSphere
-            heightSegmentCount={20}
-            widthSegmentCount={20}
-            radius={SPHERE_RADIUS}
-            position={[0, SPHERE_RADIUS, 0]}
-            materials={["earth"]}
-            facesOutward
-            highAccuracyEvents
-            onClickState={handleSphereClick}
-          />
+              <ViroSphere
+                heightSegmentCount={20}
+                widthSegmentCount={20}
+                radius={SPHERE_RADIUS}
+                position={[0, SPHERE_RADIUS, 0]}
+                materials={["earth"]}
+                facesOutward
+                highAccuracyEvents
+                onClickState={handleSphereClick}
+              />
 
-          {/* =================================================
-              MARKERS
-          ================================================= */}
+              {/* =================================================
+                  MARKERS
+              ================================================= */}
 
-          {/* {routePoints.map((point) => {
-            const position: Vec3Tuple = [
-              point.position[0],
-              point.position[1] - 0.02,
-              point.position[2],
-            ];
+              {routePoints.map((point) => {
+                const position: Vec3Tuple = [
+                  point.position[0],
+                  point.position[1] - 0.02,
+                  point.position[2],
+                ];
 
-            return (
-              <ViroNode
-                key={point.id}
-                position={position}
-                transformBehaviors={["billboard"]}
-              >
-                <ViroImage
-                  source={require("../../assets/images/location.png")}
-                  width={0.045}
-                  height={0.045}
+                return (
+                  <ViroNode
+                    key={point.id}
+                    position={position}
+                    transformBehaviors={["billboard"]}
+                  >
+                    <ViroImage
+                      source={require("../../assets/images/location.png")}
+                      width={0.045}
+                      height={0.045}
+                    />
+                  </ViroNode>
+                );
+              })}
+
+              {/* =================================================
+                  NETWORK ARC
+              ================================================= */}
+
+              {routePoints.length === 2 && (
+                <NetworkArc
+                  from={routePoints[0]}
+                  to={routePoints[1]}
+                  sphereCenter={[
+                    sphereLocalCenter.x,
+                    sphereLocalCenter.y,
+                    sphereLocalCenter.z,
+                  ]}
+                  sphereRadius={SPHERE_RADIUS}
+                  arcHeight={0.12}
+                  segments={80}
+                  thickness={0.003}
+                  material="routeMaterial"
+                  animationDuration={1200}
                 />
-              </ViroNode>
-            );
-          })} */}
+              )}
 
-          {/* =================================================
-              NETWORK ARC
-          ================================================= */}
+              {/* ------------------------------------------------ */}
+              {/* State Highlight                                  */}
+              {/* ------------------------------------------------ */}
 
-          {/* {routePoints.length === 2 && (
-            <NetworkArc
-              from={routePoints[0]}
-              to={routePoints[1]}
-              sphereCenter={[
-                sphereLocalCenter.x,
-                sphereLocalCenter.y,
-                sphereLocalCenter.z,
-              ]}
-              sphereRadius={SPHERE_RADIUS}
-              arcHeight={0.12}
-              segments={80}
-              thickness={0.003}
-              material="routeMaterial"
-              animationDuration={1200}
-            />
-          )} */}
+              {/*
+              {selectedState && (
+                <StateHighlightPolyline
+                  feature={selectedState}
+                  color="#FF0000"
+                  earthRadius={SPHERE_RADIUS}
+                  earthPosition={[0, SPHERE_RADIUS, 0]}
+                />
+              )}
+              */}
 
-          {/* ------------------------------------------------ */}
-          {/* State Highlight                                  */}
-          {/* ------------------------------------------------ */}
-
-          {/* {selectedState && (
-            <StateHighlightPolyline
-              feature={selectedState}
-              color="#FF0000"
-              earthRadius={SPHERE_RADIUS}
-              earthPosition={[0, SPHERE_RADIUS, 0]}
-            />
-          )} */}
-
-          {selectedState && (
-            <StateHighlight
-              feature={selectedState}
-              color="#00FFFF"
-              earthRadius={SPHERE_RADIUS}
-              earthPosition={[0, SPHERE_RADIUS, 0]}
-              sphereRotation={SPHERE_ROTATION}
-            />
-          )}
+              {/*
+              {selectedState && (
+                <StateHighlight
+                  feature={selectedState}
+                  color="#00FFFF"
+                  earthRadius={SPHERE_RADIUS}
+                  earthPosition={[0, SPHERE_RADIUS, 0]}
+                  sphereRotation={SPHERE_ROTATION}
+                />
+              )}
+                */}
+            </ViroNode>
+          </ViroNode>
         </ViroNode>
       )}
     </ViroARScene>
